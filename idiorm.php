@@ -2,6 +2,16 @@
 
     /**
      *
+     * Granada
+     *
+     * Copyright (c) 2013, Erik Wiesenthal
+     * All rights reserved
+     *
+     * http://github.com/Surt/Granada/
+     *
+     * Idiorm with some small changes
+     * ( http://github.com/Surt/Granada/ ).
+     *
      * Idiorm
      *
      * http://github.com/j4mie/idiorm/
@@ -50,6 +60,10 @@
 
         const DEFAULT_CONNECTION = 'default';
 
+        // Limit clause style
+        const LIMIT_STYLE_TOP_N = "top";
+        const LIMIT_STYLE_LIMIT = "limit";
+
         // ------------------------ //
         // --- CLASS PROPERTIES --- //
         // ------------------------ //
@@ -64,9 +78,12 @@
             'password' => null,
             'driver_options' => null,
             'identifier_quote_character' => null, // if this is null, will be autodetected
+            'limit_clause_style' => null, // if this is null, will be autodetected
             'logging' => false,
+            'logger' => null,
             'caching' => false,
-            'return_result_sets' => false,
+            'return_result_sets' => true,
+            'find_many_primary_id_as_key' => true,
         );
 
         // Map of configuration settings
@@ -159,6 +176,13 @@
         // this instance only. Overrides the config settings.
         protected $_instance_id_column = null;
 
+        // name of the resulSet Object
+        public $resultSetClass = 'IdiormResultSet';
+
+        // associative results flag
+        protected $_associative_results = true;
+
+
         // ---------------------- //
         // --- STATIC METHODS --- //
         // ---------------------- //
@@ -187,13 +211,33 @@
                 }
             } else {
                 if (is_null($value)) {
-                    // Shortcut: If only one string argument is passed, 
+                    // Shortcut: If only one string argument is passed,
                     // assume it's a connection string
                     $value = $key;
                     $key = 'connection_string';
                 }
                 self::$_config[$connection_name][$key] = $value;
             }
+        }
+
+        /**
+         * Retrieve configuration options by key, or as whole array.
+         * @param string $key
+         * @param string $connection_name Which connection to use
+         */
+        public static function get_config($key = null, $connection_name = self::DEFAULT_CONNECTION) {
+            if ($key) {
+                return self::$_config[$connection_name][$key];
+            } else {
+                return self::$_config[$connection_name];
+            }
+        }
+
+        /**
+         * Delete all configs in _config array.
+         */
+        public static function reset_config() {
+            self::$_config = array();
         }
 
         /**
@@ -247,13 +291,21 @@
          * This is public in case the ORM should use a ready-instantiated
          * PDO object as its database connection. Accepts an optional string key
          * to identify the connection if multiple connections are used.
-         * @param ORM $db
+         * @param PDO $db
          * @param string $connection_name Which connection to use
          */
         public static function set_db($db, $connection_name = self::DEFAULT_CONNECTION) {
             self::_setup_db_config($connection_name);
             self::$_db[$connection_name] = $db;
             self::_setup_identifier_quote_character($connection_name);
+            self::_setup_limit_clause_style($connection_name);
+        }
+
+        /**
+         * Delete all registered PDO objects in _db array.
+         */
+        public static function reset_db() {
+            self::$_db = array();
         }
 
         /**
@@ -266,7 +318,20 @@
         protected static function _setup_identifier_quote_character($connection_name) {
             if (is_null(self::$_config[$connection_name]['identifier_quote_character'])) {
                 self::$_config[$connection_name]['identifier_quote_character'] =
-                     self::_detect_identifier_quote_character($connection_name);
+                    self::_detect_identifier_quote_character($connection_name);
+            }
+        }
+
+        /**
+         * Detect and initialise the limit clause style ("SELECT TOP 5" /
+         * "... LIMIT 5"). If this has been specified manually using
+         * ORM::configure('limit_clause_style', 'top'), this will do nothing.
+         * @param string $connection_name Which connection to use
+         */
+        public static function _setup_limit_clause_style($connection_name) {
+            if (is_null(self::$_config[$connection_name]['limit_clause_style'])) {
+                self::$_config[$connection_name]['limit_clause_style'] =
+                    self::_detect_limit_clause_style($connection_name);
             }
         }
 
@@ -277,7 +342,7 @@
          * @return string
          */
         protected static function _detect_identifier_quote_character($connection_name) {
-            switch(self::$_db[$connection_name]->getAttribute(PDO::ATTR_DRIVER_NAME)) {
+            switch(self::get_db($connection_name)->getAttribute(PDO::ATTR_DRIVER_NAME)) {
                 case 'pgsql':
                 case 'sqlsrv':
                 case 'dblib':
@@ -294,12 +359,29 @@
         }
 
         /**
+         * Returns a constant after determining the appropriate limit clause
+         * style
+         * @param string $connection_name Which connection to use
+         * @return string Limit clause style keyword/constant
+         */
+        protected static function _detect_limit_clause_style($connection_name) {
+            switch(self::get_db($connection_name)->getAttribute(PDO::ATTR_DRIVER_NAME)) {
+                case 'sqlsrv':
+                case 'dblib':
+                case 'mssql':
+                    return ORM::LIMIT_STYLE_TOP_N;
+                default:
+                    return ORM::LIMIT_STYLE_LIMIT;
+            }
+        }
+
+        /**
          * Returns the PDO instance used by the the ORM to communicate with
          * the database. This can be called if any low-level DB access is
          * required outside the class. If multiple connections are used,
          * accepts an optional key name for the connection.
          * @param string $connection_name Which connection to use
-         * @return ORM
+         * @return PDO
          */
         public static function get_db($connection_name = self::DEFAULT_CONNECTION) {
             self::_setup_db($connection_name); // required in case this is called before Idiorm is instantiated
@@ -342,7 +424,7 @@
         */
         protected static function _execute($query, $parameters = array(), $connection_name = self::DEFAULT_CONNECTION) {
             self::_log_query($query, $parameters, $connection_name);
-            $statement = self::$_db[$connection_name]->prepare($query);
+            $statement = self::get_db($connection_name)->prepare($query);
 
             self::$_last_statement = $statement;
 
@@ -394,6 +476,13 @@
 
             self::$_last_query = $bound_query;
             self::$_query_log[$connection_name][] = $bound_query;
+
+
+            if(is_callable(self::$_config[$connection_name]['logger'])){
+                $logger = self::$_config[$connection_name]['logger'];
+                $logger($bound_query);
+            }
+
             return true;
         }
 
@@ -451,6 +540,10 @@
             $this->_data = $data;
 
             $this->_connection_name = $connection_name;
+
+            // Set the flag as config dictates
+            $this->_associative_results  = self::$_config[$this->_connection_name]['find_many_primary_id_as_key'];
+
             self::_setup_db_config($connection_name);
         }
 
@@ -467,6 +560,33 @@
             if (!is_null($data)) {
                 return $this->hydrate($data)->force_all_dirty();
             }
+            return $this;
+        }
+
+        /**
+         * Set the ORM instance to return non associative results sets
+         * @return ORM instance
+         */
+        public function non_associative() {
+            $this->_associative_results = false;
+            return $this;
+        }
+
+        /**
+         * Set the ORM instance to return associative results sets
+         * @return ORM instance
+         */
+        public function associative() {
+            $this->_associative_results = true;
+            return $this;
+        }
+
+        /**
+         * Set the ORM instance to return associative (or not) results sets, as config dictates
+         * @return ORM instance
+         */
+        public function reset_associative() {
+            $this->_associative_results  = self::$_config[$this->_connection_name]['find_many_primary_id_as_key'];
             return $this;
         }
 
@@ -507,8 +627,8 @@
             if (!is_null($id)) {
                 $this->where_id_is($id);
             }
-            $this->limit(1);
-            $rows = $this->_run();
+
+            $rows = $this->limit(1)->_run();
 
             if (empty($rows)) {
                 return false;
@@ -538,9 +658,27 @@
          * no rows were returned.
          * @return array
          */
-        protected function _find_many() {
+        protected function _find_many($associative = true) {
             $rows = $this->_run();
-            return array_map(array($this, '_create_instance_from_row'), $rows);
+            return $this->_get_instances($rows);
+        }
+
+        /**
+         * Create instances of each row in the result and map
+         * them to an associative array with the primary IDs as
+         * the array keys.
+         * @param array $rows
+         * @return array
+         */
+        protected function _get_instances($rows) {
+            $size = count($rows);
+            $instances = array();
+            for ($i = 0; $i < $size; $i++) {
+                $row = $this->_create_instance_from_row($rows[$i]);
+                $key = (isset($row->{$this->_instance_id_column}) && $this->_associative_results) ? $row->id() : $i;
+                $instances[$key] = $row;
+            }
+            return $instances;
         }
 
         /**
@@ -550,7 +688,14 @@
          * @return \IdiormResultSet
          */
         public function find_result_set() {
-            return new IdiormResultSet($this->_find_many());
+            $resultSetClass = $this->resultSetClass;
+            if(is_a($resultSetClass, 'IdiormResultSet', true)){
+                $result = new $resultSetClass($this->_find_many());
+            }
+            else{
+                $result = new IdiormResultSet($this->_find_many());
+            }
+            return $result;
         }
 
         /**
@@ -560,7 +705,7 @@
          * @return array
          */
         public function find_array() {
-            return $this->_run(); 
+            return $this->_run();
         }
 
         /**
@@ -616,15 +761,21 @@
             if('*' != $column) {
                 $column = $this->_quote_identifier($column);
             }
+            $result_columns = $this->_result_columns;
+            $this->_result_columns = array();
             $this->select_expr("$sql_function($column)", $alias);
             $result = $this->find_one();
+            $this->_result_columns = $result_columns;
 
             $return_value = 0;
             if($result !== false && isset($result->$alias)) {
-                if((int) $result->$alias == (float) $result->$alias) {
+                if (!is_numeric($result->$alias)) {
+                    $return_value = $result->$alias;
+                }
+                elseif((int) $result->$alias == (float) $result->$alias) {
                     $return_value = (int) $result->$alias;
                 } else {
-                    $return_value = (float) $result->$alias;
+                     $return_value = (float) $result->$alias;
                 }
             }
             return $return_value;
@@ -697,8 +848,12 @@
          * the alias to return the column as.
          */
         public function select($column, $alias=null) {
-            $column = $this->_quote_identifier($column);
-            return $this->_add_result_column($column, $alias);
+            $columns = array_map('trim',explode(',',$column));
+            foreach($columns as $column){
+                $column = $this->_quote_identifier($column);
+                $this->_add_result_column($column, $alias);
+            }
+            return $this;
         }
 
         /**
@@ -714,14 +869,14 @@
          * Add columns to the list of columns returned by the SELECT
          * query. This defaults to '*'. Many columns can be supplied
          * as either an array or as a list of parameters to the method.
-         * 
+         *
          * Note that the alias must not be numeric - if you want a
          * numeric alias then prepend it with some alpha chars. eg. a1
-         * 
+         *
          * @example select_many(array('alias' => 'column', 'column2', 'alias2' => 'column3'), 'column4', 'column5');
          * @example select_many('column', 'column2', 'column3');
          * @example select_many(array('column', 'column2', 'column3'), 'column4', 'column5');
-         * 
+         *
          * @return \ORM
          */
         public function select_many() {
@@ -740,16 +895,16 @@
 
         /**
          * Add an unquoted expression to the list of columns returned
-         * by the SELECT query. Many columns can be supplied as either 
+         * by the SELECT query. Many columns can be supplied as either
          * an array or as a list of parameters to the method.
-         * 
+         *
          * Note that the alias must not be numeric - if you want a
          * numeric alias then prepend it with some alpha chars. eg. a1
-         * 
+         *
          * @example select_many_expr(array('alias' => 'column', 'column2', 'alias2' => 'column3'), 'column4', 'column5')
          * @example select_many_expr('column', 'column2', 'column3')
          * @example select_many_expr(array('column', 'column2', 'column3'), 'column4', 'column5')
-         * 
+         *
          * @return \ORM
          */
         public function select_many_expr() {
@@ -769,11 +924,11 @@
         /**
          * Take a column specification for the select many methods and convert it
          * into a normalised array of columns and aliases.
-         * 
+         *
          * It is designed to turn the following styles into a normalised array:
-         * 
+         *
          * array(array('alias' => 'column', 'column2', 'alias2' => 'column3'), 'column4', 'column5'))
-         * 
+         *
          * @param array $columns
          * @return array
          */
@@ -936,11 +1091,16 @@
         protected function _add_simple_condition($type, $column_name, $separator, $value) {
             // Add the table name in case of ambiguous columns
             if (count($this->_join_sources) > 0 && strpos($column_name, '.') === false) {
-                $column_name = "{$this->_table_name}.{$column_name}";
+                $table = $this->_table_name;
+                if (!is_null($this->_table_alias)) {
+                    $table = $this->_table_alias;
+                }
+
+                $column_name = "{$table}.{$column_name}";
             }
             $column_name = $this->_quote_identifier($column_name);
             return $this->_add_condition($type, "{$column_name} {$separator} ?", $value);
-        } 
+        }
 
         /**
          * Return a string containing the given number of question marks,
@@ -1135,7 +1295,7 @@
         }
 
         /**
-         * Add an unquoted expression to the list of columns to GROUP BY 
+         * Add an unquoted expression to the list of columns to GROUP BY
          */
         public function group_by_expr($expr) {
             $this->_group_by[] = $expr;
@@ -1289,13 +1449,19 @@
          * Build the start of the SELECT statement
          */
         protected function _build_select_start() {
+            $fragment = 'SELECT ';
             $result_columns = join(', ', $this->_result_columns);
+
+            if (!is_null($this->_limit) &&
+                self::$_config[$this->_connection_name]['limit_clause_style'] === ORM::LIMIT_STYLE_TOP_N) {
+                $fragment .= "TOP {$this->_limit} ";
+            }
 
             if ($this->_distinct) {
                 $result_columns = 'DISTINCT ' . $result_columns;
             }
 
-            $fragment = "SELECT {$result_columns} FROM " . $this->_quote_identifier($this->_table_name);
+            $fragment .= "{$result_columns} FROM " . $this->_quote_identifier($this->_table_name);
 
             if (!is_null($this->_table_alias)) {
                 $fragment .= " " . $this->_quote_identifier($this->_table_alias);
@@ -1373,14 +1539,17 @@
          * Build LIMIT
          */
         protected function _build_limit() {
-            if (!is_null($this->_limit)) {
-                $clause = 'LIMIT';
+            $fragment = '';
+            if (!is_null($this->_limit) &&
+                self::$_config[$this->_connection_name]['limit_clause_style'] == ORM::LIMIT_STYLE_LIMIT) {
                 if (self::$_db[$this->_connection_name]->getAttribute(PDO::ATTR_DRIVER_NAME) == 'firebird') {
-                    $clause = 'ROWS';
+                    $fragment = 'ROWS';
+                } else {
+                    $fragment = 'LIMIT';
                 }
-                return "$clause " . $this->_limit;
+                $fragment .= " {$this->_limit}";
             }
-            return '';
+            return $fragment;
         }
 
         /**
@@ -1494,6 +1663,7 @@
                 $cached_result = self::_check_query_cache($cache_key, $this->_connection_name);
 
                 if ($cached_result !== false) {
+                    $this->reset();
                     return $cached_result;
                 }
             }
@@ -1511,12 +1681,21 @@
             }
 
             // reset Idiorm after executing the query
-            $this->_values = array();
-            $this->_result_columns = array('*');
-            $this->_using_default_result_columns = true;
+            $this->reset();
 
             return $rows;
         }
+
+
+        /**
+         * reset Idiorm after executing the query
+        */
+        protected function reset(){
+            $this->_values = array();
+            $this->_result_columns = array('*');
+            $this->_using_default_result_columns = true;
+        }
+
 
         /**
          * Return the raw data wrapped by this ORM
@@ -1569,7 +1748,7 @@
          * database when save() is called.
          */
         public function set($key, $value = null) {
-            $this->_set_orm_property($key, $value);
+            return $this->_set_orm_property($key, $value);
         }
 
         /**
@@ -1577,12 +1756,12 @@
          * To set multiple properties at once, pass an associative array
          * as the first parameter and leave out the second parameter.
          * Flags the properties as 'dirty' so they will be saved to the
-         * database when save() is called. 
+         * database when save() is called.
          * @param string|array $key
          * @param string|null $value
          */
         public function set_expr($key, $value = null) {
-            $this->_set_orm_property($key, $value, true);
+            return $this->_set_orm_property($key, $value, true);
         }
 
         /**
@@ -1604,6 +1783,7 @@
                     $this->_expr_fields[$field] = true;
                 }
             }
+            return $this;
         }
 
         /**
@@ -1625,22 +1805,32 @@
         /**
          * Save any fields which have been modified on this object
          * to the database.
+         * Added: on duplicate key update, only for mysql
+         * If you want to insert a record, or update it if any of the unique keys already exists on db
          */
-        public function save() {
+        public function save($ignore = false) {
             $query = array();
 
             // remove any expression fields as they are already baked into the query
             $values = array_values(array_diff_key($this->_dirty_fields, $this->_expr_fields));
 
-            if (!$this->_is_new) { // UPDATE
-                // If there are no dirty values, do nothing
-                if (empty($values) && empty($this->_expr_fields)) {
-                    return true;
+            if($ignore)
+            {
+                $query   = $this->_build_insert_update();
+                $values  = array_merge($values, $values);
+            }
+            else
+            {
+                if (!$this->_is_new) { // UPDATE
+                    // If there are no dirty values, do nothing
+                    if (empty($values) && empty($this->_expr_fields)) {
+                        return true;
+                    }
+                    $query = $this->_build_update();
+                    $values[] = $this->id();
+                } else { // INSERT
+                    $query = $this->_build_insert();
                 }
-                $query = $this->_build_update();
-                $values[] = $this->id();
-            } else { // INSERT
-                $query = $this->_build_insert();
             }
 
             $success = self::_execute($query, $values, $this->_connection_name);
@@ -1657,7 +1847,7 @@
                 }
             }
 
-            $this->_dirty_fields = array();
+            $this->_dirty_fields = $this->_expr_fields = array();
             return $success;
         }
 
@@ -1703,6 +1893,26 @@
         }
 
         /**
+         * Added: Build an INSERT ON DUPLICATE KEY UPDATE query
+         * Attention: This method only works on Mysql Databases
+         */
+        protected function _build_insert_update() {
+            $query = array();
+            $query[] = "INSERT INTO";
+            $query[] = $this->_quote_identifier($this->_table_name);
+            $field_list = array_map(array($this, '_quote_identifier'), array_keys($this->_dirty_fields));
+            $query[] = "(" . implode(", ", $field_list) . ")";
+            $query[] = "VALUES";
+            $placeholders = $this->_create_placeholders($this->_dirty_fields);
+            $query[] = "({$placeholders})";
+
+            $query[] = " ON DUPLICATE KEY UPDATE ";
+            $query[] =  implode(" = ?, ", $field_list)." = ? ";
+            return implode(" ", $query);
+        }
+
+
+        /**
          * Delete this record from the database
          */
         public function delete() {
@@ -1719,18 +1929,33 @@
 
         /**
          * Delete many records from the database
+         * Added: could delete many of a join query, if you define $join to true
+         * and the table where you want to delete the records
          */
-        public function delete_many() {
-            // Build and return the full DELETE statement by concatenating
-            // the results of calling each separate builder method.
-            $query = $this->_join_if_not_empty(" ", array(
-                "DELETE FROM",
-                $this->_quote_identifier($this->_table_name),
-                $this->_build_where(),
-            ));
+        public function delete_many($join = false, $table = false) {
+            if($join){
+                // Build and return the full DELETE statement by concatenating
+                // the results of calling each separate builder method.
+                $query = $this->_join_if_not_empty(" ", array(
+                    "DELETE $table FROM",
+                    $this->_quote_identifier($this->_table_name),
+                    $this->_build_join(),
+                    $this->_build_where()
+                ));
+            }
+            else{
+                // Build and return the full DELETE statement by concatenating
+                // the results of calling each separate builder method.
+                $query = $this->_join_if_not_empty(" ", array(
+                    "DELETE FROM",
+                    $this->_quote_identifier($this->_table_name),
+                    $this->_build_where(),
+                ));
+            }
 
             return self::_execute($query, $this->_values, $this->_connection_name);
         }
+
 
         // --------------------- //
         // ---  ArrayAccess  --- //
@@ -1774,6 +1999,49 @@
 
         public function __isset($key) {
             return $this->offsetExists($key);
+        }
+
+        /**
+         * Magic method to capture calls to undefined class methods.
+         * In this case we are attempting to convert camel case formatted
+         * methods into underscore formatted methods.
+         *
+         * This allows us to call ORM methods using camel case and remain
+         * backwards compatible.
+         *
+         * @param  string   $name
+         * @param  array    $arguments
+         * @return ORM
+         */
+        public function __call($name, $arguments)
+        {
+            $method = strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $name));
+            //return call_user_func_array(array($this, $method), $arguments);
+
+            if (method_exists($this, $method)) {
+                return call_user_func_array(array($this, $method), $arguments);
+            } else {
+                return false;
+            }
+        }
+
+        /**
+         * Magic method to capture calls to undefined static class methods.
+         * In this case we are attempting to convert camel case formatted
+         * methods into underscore formatted methods.
+         *
+         * This allows us to call ORM methods using camel case and remain
+         * backwards compatible.
+         *
+         * @param  string   $name
+         * @param  array    $arguments
+         * @return ORM
+         */
+        public static function __callStatic($name, $arguments)
+        {
+            $method = strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $name));
+
+            return call_user_func_array(array('ORM', $method), $arguments);
         }
     }
 
@@ -1885,7 +2153,7 @@
      * A result set class for working with collections of model instances
      * @author Simon Holywell <treffynnon@php.net>
      */
-    class IdiormResultSet implements Countable, IteratorAggregate, ArrayAccess, Serializable {
+    class IdiormResultSet implements ArrayAccess, Countable, IteratorAggregate {
         /**
          * The current result set as an array
          * @var array
@@ -1923,7 +2191,55 @@
         public function as_array() {
             return $this->get_results();
         }
-        
+
+        /**
+         * Get the array keys (primary keys of the results)
+         * @return array
+         */
+        public function keys(){
+            return array_keys($this->_results);
+        }
+
+        /**
+         * Merge the resultSet with an array
+         * @return array
+         */
+        public function merge(IdiormResultSet $result) {
+            array_push($this->_results, $this->_results);
+            return $this;
+        }
+
+        /**
+         * Get the first element of the result set
+         * @return Model
+         */
+        public function first(){
+            return reset($this->_results);
+        }
+
+        /**
+         * Get the last element of the result set
+         * @return Model
+         */
+        public function last(){
+            return end($this->_results);
+        }
+
+        /**
+         * Push an element on the result set
+         * @return Model
+         */
+        public function add($value){
+            array_push($this->_results, $value);
+            return $this;
+        }
+
+        public function rewind() { return reset($this->_results); }
+        public function current() { return current($this->_results); }
+        public function key() { return key($this->_results); }
+        public function next() { return next($this->_results); }
+        public function valid() { return isset($this->_results[$this->id()]); }
+
         /**
          * Get the number of records in the result set
          * @return int
@@ -1958,14 +2274,21 @@
         public function offsetGet($offset) {
             return $this->_results[$offset];
         }
-        
+
         /**
          * ArrayAccess
          * @param int|string $offset
          * @param mixed $value
          */
         public function offsetSet($offset, $value) {
-            $this->_results[$offset] = $value;
+            if (is_null($offset))
+            {
+                $this->_results[] = $value;
+            }
+            else
+            {
+                $this->_results[$offset] = $value;
+            }
         }
 
         /**
@@ -1976,22 +2299,6 @@
             unset($this->_results[$offset]);
         }
 
-        /**
-         * Serializable
-         * @return string
-         */
-        public function serialize() {
-            return serialize($this->_results);
-        }
-
-        /**
-         * Serializable
-         * @param string $serialized
-         * @return array
-         */
-        public function unserialize($serialized) {
-            return unserialize($serialized);
-        }
 
         /**
          * Call a method on all models in a result set. This allows for method
