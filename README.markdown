@@ -27,7 +27,7 @@ $user->first_name = 'Doe';
 $user->save();
 
 // select relationship
-$post_list = User::posts()->find_many();
+$posts_list = $user->posts()->find_many();
 foreach ($posts as $post) {
     echo $post->content;
 }
@@ -40,12 +40,13 @@ Install
 -------
 Using composer:
 ```
-  "requires": {
-        ...
+  "require": {
+        
         "surt/granada": "dev-master"
-        ...
+      
     }
 ```
+(You could try the `dev-develop` branch too. It consists in the same component Namespace based. Some names, as IdiormResultSet changed, (Granada\ResultSet)
 
 Configure it:
 ```php
