@@ -2182,6 +2182,6 @@ class ORM implements ArrayAccess {
     {
         $method = strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $name));
 
-        return call_user_func_array(array(self, $method), $arguments);
+        return call_user_func_array(array('self', $method), $arguments);
     }
 }
